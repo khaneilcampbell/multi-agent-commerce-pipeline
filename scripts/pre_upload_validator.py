@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from db import log_run
+from validation import validate_product_name, ValidationError
 
 _ROOT      = Path(__file__).resolve().parent.parent
 ASSETS_DIR = _ROOT / "04_Assets" / "ReadyToUpload"
@@ -44,7 +45,7 @@ class ValidationResult:
         self.errors.append(msg)
 
 
-def validate(product_name: str) -> ValidationResult:
+def validate(product_name: str, *, assets_dir: Path = ASSETS_DIR, products_dir: Path = _ROOT / "02_Products") -> ValidationResult:
     """
     Validates listing.json and mockup images for a product.
 
@@ -56,7 +57,12 @@ def validate(product_name: str) -> ValidationResult:
       - At least 1 mockup JPEG present
     """
     result = ValidationResult()
-    product_dir = ASSETS_DIR / product_name
+    try:
+        product_name = validate_product_name(product_name)
+    except ValidationError:
+        result.fail("Invalid product name")
+        return result
+    product_dir = assets_dir / product_name
     payload_file = product_dir / "listing.json"
 
     if not payload_file.exists():
@@ -75,6 +81,9 @@ def validate(product_name: str) -> ValidationResult:
 
     # Title
     title = payload.get("title", "")
+    if not isinstance(title, str):
+        result.fail("Title must be text")
+        title = ""
     if len(title) > TITLE_MAX_CHARS:
         result.fail(f"Title too long: {len(title)} chars (max {TITLE_MAX_CHARS})")
     if not title.strip():
@@ -95,6 +104,9 @@ def validate(product_name: str) -> ValidationResult:
 
     # Description
     desc = payload.get("description", "")
+    if not isinstance(desc, str):
+        result.fail("Description must be text")
+        desc = ""
     if len(desc) < DESC_MIN_CHARS:
         result.fail(f"Description too short: {len(desc)} chars (min {DESC_MIN_CHARS})")
 
@@ -108,8 +120,8 @@ def validate(product_name: str) -> ValidationResult:
         result.fail(f"Price ${price} outside the allowed range (${PRICE_MIN}\u2013${PRICE_MAX})")
 
     # Images — look in Mockups/ or the product ReadyToUpload dir
-    mockups_dir  = _ROOT / "02_Products" / product_name / "Mockups"
-    staged_dir   = ASSETS_DIR / product_name
+    mockups_dir  = products_dir / product_name / "Mockups"
+    staged_dir   = assets_dir / product_name
     jpeg_images  = list(mockups_dir.glob("*.jpg")) if mockups_dir.exists() else []
     if not jpeg_images:
         jpeg_images = list(staged_dir.glob("*.jpg"))

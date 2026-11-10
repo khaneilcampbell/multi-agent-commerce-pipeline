@@ -40,6 +40,12 @@ To undo, set `AGENT_ENV_SCOPING=false` and restart.
 
 ## 2. Run the loop as a non-root user
 
+`commerce-pipeline.service` already runs as `User=commerce` from
+`/home/commerce/multi-agent-commerce-pipeline`, with `ProtectSystem=strict`,
+`ProtectHome=read-only` (its own folder stays writable), no capabilities and
+the rest of the systemd sandbox. On a server that still has the old `/root`
+install, move it over once:
+
 ```bash
 # as root on the VPS
 systemctl stop commerce-pipeline
@@ -47,21 +53,29 @@ useradd --create-home --shell /usr/sbin/nologin commerce
 mv /root/multi-agent-commerce-pipeline /home/commerce/
 chown -R commerce:commerce /home/commerce/multi-agent-commerce-pipeline
 chmod 600 /home/commerce/multi-agent-commerce-pipeline/.env
-# the storefront deploy key moves with it
+# the storefront deploy key moves with it; known_hosts must already list the
+# git host, because ~/.ssh is read only to the service
 mkdir -p /home/commerce/.ssh && cp /root/.ssh/<storefront deploy key>* /home/commerce/.ssh/
-cp /root/.ssh/config /home/commerce/.ssh/ 2>/dev/null || true
+cp /root/.ssh/config /root/.ssh/known_hosts /home/commerce/.ssh/ 2>/dev/null || true
 chown -R commerce:commerce /home/commerce/.ssh && chmod 700 /home/commerce/.ssh
-sed -i 's#/root/multi-agent-commerce-pipeline#/home/commerce/multi-agent-commerce-pipeline#g; s#^User=root#User=commerce#' \
-  /home/commerce/multi-agent-commerce-pipeline/commerce-pipeline.service
+# the root-owned kill switch folder (touch disabled in it to stop the service)
+install -d -m 755 -o root -g root /etc/commerce-pipeline
 cp /home/commerce/multi-agent-commerce-pipeline/commerce-pipeline.service /etc/systemd/system/
-systemctl daemon-reload && systemctl start commerce-pipeline
+systemctl daemon-reload
 sudo -u commerce /home/commerce/multi-agent-commerce-pipeline/run.sh preflight
+systemctl start commerce-pipeline
+systemctl status commerce-pipeline
+systemd-analyze security commerce-pipeline   # exposure score; lower is better
 ```
 
 The `.venv` keeps working after the move only if it was created with
 `--copies`; otherwise recreate it as the new user:
 `sudo -u commerce bash -c 'cd ~/multi-agent-commerce-pipeline && rm -rf .venv && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt'`.
 Move any cron entries from `crontab -e` (root) to `crontab -u commerce -e`.
+
+If a phase fails with "Read-only file system" or "Operation not permitted"
+after the move, `journalctl -u commerce-pipeline` names the path or call; add
+the path to `ReadWritePaths=` in the unit rather than removing the sandbox.
 
 ## 3. One user and env file per side effect (later)
 

@@ -25,6 +25,9 @@
 #   ./run.sh full <product>             — Full autonomous: phase3 → 3B → 4 → 5 → 6
 #   ./run.sh pause                      — Pause the autonomous loop (buyer delivery keeps running)
 #   ./run.sh resume                     — Resume the autonomous loop
+#   ./run.sh kill                       — Kill switch: stop everything, buyer delivery included
+#   ./run.sh unkill                     — Clear the kill switch (then: systemctl start commerce-pipeline)
+#   ./run.sh spend                      — Anthropic spend today and this month against the caps
 #
 # Cron examples:
 #   0 6 * * * /path/to/project/run.sh phase2 >> /path/to/project/outputs/cron.log 2>&1
@@ -176,8 +179,23 @@ case "$PHASE" in
         rm -f "$SCRIPT_DIR/PAUSE"
         echo "[run.sh] Loop resumed. It picks up at its next cycle."
         ;;
+    kill)
+        touch "$SCRIPT_DIR/KILL"
+        echo "[run.sh] Kill switch ON. No pipeline script starts, buyer delivery included."
+        echo "         The loop exits at its next check (within ${DELIVERY_INTERVAL:-600}s while sleeping)."
+        echo "         To end a phase that is running now: sudo systemctl stop commerce-pipeline"
+        echo "         Undo: ./run.sh unkill && sudo systemctl start commerce-pipeline"
+        ;;
+    unkill)
+        rm -f "$SCRIPT_DIR/KILL"
+        "$PYTHON" scripts/kill_switch.py || true
+        echo "[run.sh] KILL file removed. Start the loop again: sudo systemctl start commerce-pipeline"
+        ;;
+    spend)
+        "$PYTHON" scripts/spend_cap.py status
+        ;;
     *)
-        echo "Usage: $0 {pause|resume|db-init|preflight|digest|sales|canva-auth|stripe-auth|phase1|phase2|phase2-rich|phase3|phase3b|phase4|phase5|phase6|phase7|approve|deliver|store-build|store-deploy|backup|all|full|design} [product_name]"
+        echo "Usage: $0 {pause|resume|kill|unkill|spend|db-init|preflight|digest|sales|canva-auth|stripe-auth|phase1|phase2|phase2-rich|phase3|phase3b|phase4|phase5|phase6|phase7|approve|deliver|store-build|store-deploy|backup|all|full|design} [product_name]"
         exit 1
         ;;
 esac

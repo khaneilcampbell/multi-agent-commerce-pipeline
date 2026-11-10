@@ -60,6 +60,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent))
 from db import log_run
 from canva_api import CanvaClient, CanvaAPIError
+import spend_cap
 from meta_generator import (
     find_product_section,
     list_products,
@@ -275,6 +276,9 @@ def _call_api(prompt: str) -> dict[str, Any]:
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
 
+    # Raises SpendCapReached (a RuntimeError) once the Anthropic budget is spent
+    spend_cap.require()
+
     canva_token = os.getenv("CANVA_MCP_TOKEN", "")
     mcp_server: dict[str, Any] = {"type": "url", "url": CANVA_MCP_URL, "name": "canva"}
     if canva_token:
@@ -314,7 +318,10 @@ def _call_api(prompt: str) -> dict[str, Any]:
         raise RuntimeError(f"API 401: {body or resp.text[:200]}")
 
     resp.raise_for_status()
-    return resp.json()
+    body = resp.json()
+    cost = spend_cap.record(MODEL, body.get("usage"))
+    print(f"  [3B] Anthropic cost this call: ${cost:.4f}")
+    return body
 
 
 def _collect_text(response: dict[str, Any]) -> str:

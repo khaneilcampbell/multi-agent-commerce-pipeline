@@ -89,6 +89,27 @@ phase stops at its next step except buyer delivery, so paid orders still get
 their templates. `./run.sh resume` starts it again. Paused phases are not
 counted as failed attempts.
 
+### Spend cap and kill switch
+
+**Kill switch (hard stop).** `./run.sh kill` stops everything, buyer delivery
+included: the loop exits cleanly at its next check, systemd does not restart
+it, and `scripts/scoped_env.py` refuses to start any pipeline script.
+`./run.sh unkill` clears it, then `sudo systemctl start commerce-pipeline`.
+Two other ways to turn it on: `COMMERCE_LOOP_ENABLED=false` in `.env`, or, as
+root, `touch /etc/commerce-pipeline/disabled`. The root-owned file is the one
+the service user cannot undo, and the unit's `ConditionPathExists` keeps
+systemd from starting the service while it exists. To end a phase that is
+already running, `sudo systemctl stop commerce-pipeline`.
+
+**Spend cap.** Every Anthropic call is priced from its token usage
+(`scripts/spend_cap.py`) and no new call starts once
+`MAX_ANTHROPIC_USD_PER_DAY` (default $2) or `MAX_ANTHROPIC_USD_PER_MONTH`
+(default $15) is spent. The cap can be overshot by at most one call.
+`./run.sh spend` shows today and this month. The ledger lives in `logs/`,
+which the service can write, so also set a workspace spend limit in the
+Anthropic Console and use a key from that workspace: that limit is the one
+the server cannot change.
+
 To see the loop's runs in AI Ops Atlas, set `ATLAS_FEED_URL` and
 `ATLAS_FEED_TOKEN` in `.env`. Each phase result (its label, ok or failed, and
 the time) is reported by `scripts/atlas_feed.py`. Prompts, product copy, buyer
@@ -183,8 +204,11 @@ deliveries  template links emailed to buyers
 
 ## Services
 
-Install the systemd unit on the VPS. If the old `shopify-pipeline` service is installed,
-stop and remove it first:
+The unit runs as the unprivileged `commerce` user from
+`/home/commerce/multi-agent-commerce-pipeline`, with a read-only filesystem
+outside that folder and the usual systemd sandboxing. Create the user and move
+the install first (docs/least-privilege.md step 2). If the old
+`shopify-pipeline` service is installed, stop and remove it first:
 
 ```bash
 systemctl disable --now shopify-pipeline 2>/dev/null; rm -f /etc/systemd/system/shopify-pipeline.service

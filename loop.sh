@@ -41,6 +41,16 @@
 #        delivery, so paid orders still get their templates. ./run.sh resume
 #        removes the file. Takes effect at the next phase, no restart needed.
 #
+# Kill switch: ./run.sh kill (or: touch KILL, COMMERCE_LOOP_ENABLED=false in
+#        .env, or as root: touch /etc/commerce-pipeline/disabled) — everything
+#        stops, buyer delivery included. The loop exits cleanly at its next
+#        check and systemd does not restart it. ./run.sh unkill clears KILL.
+#        See scripts/kill_switch.py.
+#
+# Spend cap: MAX_ANTHROPIC_USD_PER_DAY / MAX_ANTHROPIC_USD_PER_MONTH in .env
+#        (defaults $2 / $15). No model phase starts once either is spent.
+#        See scripts/spend_cap.py.
+#
 # Atlas: with ATLAS_FEED_URL and ATLAS_FEED_TOKEN in .env, each phase result is
 #        reported to AI Ops Atlas (scripts/atlas_feed.py). Optional.
 #
@@ -95,6 +105,26 @@ COOLDOWN_HOURS="${PUBLISH_COOLDOWN_HOURS:-$(_env_get PUBLISH_COOLDOWN_HOURS 24)}
 [[ "$WEEKLY_LIMIT" =~ ^[0-9]+$ ]] || { echo "[loop] ERROR: WEEKLY_PUBLISH_LIMIT must be a whole number" >&2; exit "$EX_CONFIG"; }
 [[ "$COOLDOWN_HOURS" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "[loop] ERROR: PUBLISH_COOLDOWN_HOURS must be a number" >&2; exit "$EX_CONFIG"; }
 
+# ── Kill switch ───────────────────────────────────────────────────────────────
+# Prints why and returns 0 when the switch is on. A check that cannot run
+# counts as on, so a broken install stops instead of spending.
+_kill_reason() {
+    local out
+    out=$("$PYTHON" scripts/kill_switch.py 2>&1) && return 1
+    echo "${out:-kill switch check failed}"
+    return 0
+}
+
+_exit_if_killed() {
+    local why
+    why=$(_kill_reason) || return 0
+    echo "[loop] $(date -u '+%Y-%m-%d %H:%M:%S UTC') Kill switch on — stopping. $why" | tee -a "$LOG_FILE"
+    "$PYTHON" scripts/scoped_env.py scripts/atlas_feed.py skipped "Loop" "Kill switch on" >> "$LOG_FILE" 2>&1 || true
+    exit 0
+}
+
+_exit_if_killed
+
 echo $$ > "$PID_FILE"
 
 # ── Pre-flight credential check ───────────────────────────────────────────────
@@ -144,6 +174,7 @@ _sleep_with_delivery() {
         chunk=$(( remaining < DELIVERY_INTERVAL ? remaining : DELIVERY_INTERVAL ))
         sleep "$chunk"
         remaining=$(( remaining - chunk ))
+        _exit_if_killed
         if (( remaining > 0 )); then
             _run_phase "Order delivery" "$PYTHON" scripts/scoped_env.py scripts/order_delivery.py \
                 || _err "Order delivery had failures — will retry."
@@ -163,6 +194,7 @@ _sleep_or_exit() {
 _run_phase() {
     local label="$1"
     shift
+    _exit_if_killed
     # Buyers already paid, so delivery keeps running while the loop is paused
     if _paused && [[ "$label" != "Order delivery" ]]; then
         _log "Skipped $label — loop is paused (remove $PAUSE_FILE or ./run.sh resume)"
@@ -227,6 +259,7 @@ _log "Autonomous loop starting. PID=$$"
 _log "Weekly publish limit : ${WEEKLY_LIMIT} listings/week"
 _log "Publish cooldown     : ${COOLDOWN_HOURS}h between listings"
 _log "Sleep interval       : ${SLEEP}s"
+_log "Anthropic spend      : $("$PYTHON" scripts/spend_cap.py status 2>&1 | sed 's/^\[spend_cap\] //')"
 _log "Logs: $LOG_FILE"
 _log "========================================"
 
@@ -236,6 +269,7 @@ WEEK_LIMIT_SECS=$((7 * 24 * 3600))
 
 while true; do
     CYCLE=$((CYCLE + 1))
+    _exit_if_killed
     _log "──────── CYCLE $CYCLE START ────────"
 
     # ── Daily tasks (run once per calendar day) ───────────────────────────────

@@ -58,6 +58,7 @@ from common import (
     save_state,
 )
 from db import log_run
+import spend_cap
 
 _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_ENV_FILE)
@@ -102,6 +103,7 @@ def append_master_prompt(week_label: str, task_number: int, task_text: str, prom
 
 
 def generate_listing_content(task: str, guide: str, week: str) -> str:
+    spend_cap.require()  # stops the week's tasks once the Anthropic budget is spent
     response = call_with_retry(lambda: client.messages.create(
         model=MODEL,
         max_tokens=2000,
@@ -137,6 +139,7 @@ def generate_listing_content(task: str, guide: str, week: str) -> str:
             ),
         }],
     ))
+    spend_cap.record(MODEL, response.usage)
     return response.content[0].text.strip()
 
 

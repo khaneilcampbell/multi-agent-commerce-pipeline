@@ -5,25 +5,69 @@ Wants=network-online.target
 # Give up after 5 crashes in 10 minutes instead of restarting forever
 StartLimitIntervalSec=600
 StartLimitBurst=5
+# Kill switch that only root can clear: while this file exists systemd will
+# not start the service (touch /etc/commerce-pipeline/disabled as root).
+# loop.sh and scoped_env.py also check it. See scripts/kill_switch.py.
+ConditionPathExists=!/etc/commerce-pipeline/disabled
 
 [Service]
 Type=simple
-# Runs as root to match the documented /root install. To run as a dedicated
-# user (recommended), follow docs/least-privilege.md, which moves the repo to
-# /home/commerce and updates User=, WorkingDirectory=, ExecStart= and the log
-# paths below.
-User=root
-WorkingDirectory=/root/multi-agent-commerce-pipeline
-ExecStart=/root/multi-agent-commerce-pipeline/loop.sh
+# Runs as the dedicated, unprivileged "commerce" user, never root. Moving an
+# existing /root install over: docs/least-privilege.md step 2.
+User=commerce
+Group=commerce
+WorkingDirectory=/home/commerce/multi-agent-commerce-pipeline
+ExecStart=/home/commerce/multi-agent-commerce-pipeline/loop.sh
 Restart=on-failure
 RestartSec=60
 # loop.sh exits 78 on configuration errors (bad credentials, missing .env).
-# Retrying cannot fix those, so stop and wait for a manual restart.
+# Retrying cannot fix those, so stop and wait for a manual restart. The kill
+# switch and a manual stop exit 0, which Restart=on-failure never restarts.
 RestartPreventExitStatus=78
+# systemctl stop ends the loop and any phase it is running, within 30s.
+KillMode=control-group
+TimeoutStopSec=30
+StandardOutput=append:/home/commerce/multi-agent-commerce-pipeline/logs/loop.log
+StandardError=append:/home/commerce/multi-agent-commerce-pipeline/logs/loop_errors.log
+UMask=0077
+
+# ── Hardening ────────────────────────────────────────────────────────────────
+# The loop needs: outbound HTTPS (Anthropic, Canva, Stripe, Serper, SMTP),
+# git over SSH for the storefront deploy key in ~/.ssh (read only), and write
+# access to its own folder (.env token refresh, outputs/, logs/, backups/,
+# site/). Everything else is read only or hidden.
 NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/commerce/multi-agent-commerce-pipeline
 PrivateTmp=true
-StandardOutput=append:/root/multi-agent-commerce-pipeline/logs/loop.log
-StandardError=append:/root/multi-agent-commerce-pipeline/logs/loop_errors.log
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+# ── Resource limits ──────────────────────────────────────────────────────────
+# A runaway phase can't take the whole VPS down with it.
+MemoryMax=2G
+TasksMax=256
+CPUQuota=150%
 
 [Install]
 WantedBy=multi-user.target

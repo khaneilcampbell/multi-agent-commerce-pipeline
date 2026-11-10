@@ -65,6 +65,7 @@ from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, Process
 from crewai_tools import SerperDevTool
 from db import log_run
+import spend_cap
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -418,12 +419,21 @@ if __name__ == "__main__":
     print("  Niche: AI-selected by Niche Scout agent")
     print(f"{'─'*60}\n")
 
+    spend_cap.require()  # the crew makes many calls, so check the budget before it starts
     try:
         result = brand_crew.kickoff()
         log_run("brand_builder", "brand_crew", "success", "brand_guide.md written")
     except Exception as exc:
         log_run("brand_builder", "brand_crew", "failed", str(exc))
         raise
+    finally:
+        # CrewAI totals token usage across every agent call in the run. If it
+        # reports nothing, charge a conservative flat amount so the run still counts.
+        usage = getattr(brand_crew, "usage_metrics", None)
+        cost = spend_cap.record(MODEL, usage) if usage else 0.0
+        if cost == 0.0:
+            cost = spend_cap.record(MODEL, {"input_tokens": 400_000, "output_tokens": 40_000})
+        print(f"  [phase1] Anthropic cost this run: ${cost:.4f}")
 
     print(f"\n{'─'*60}")
     print("  Brand guide written to: outputs/brand_guide.md")

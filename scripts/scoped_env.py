@@ -29,6 +29,8 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from daily_caps import take
+from kill_switch import ALLOWED_WHILE_KILLED, reason as kill_reason
+from spend_cap import SpendCapReached, require as require_spend
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -74,6 +76,8 @@ AGENT_SECRETS: dict[str, frozenset[str]] = {
     "file_organizer.py":        NONE,
     "storefront.py":            NONE,
     "health_dashboard.py":      NONE,
+    "spend_cap.py":             NONE,
+    "kill_switch.py":           NONE,
 }
 
 
@@ -83,6 +87,8 @@ MODEL_SCRIPTS = frozenset(name for name, keys in AGENT_SECRETS.items()
 
 # Exit code loop.sh and preflight use for "temporary, try again later"
 EX_TEMPFAIL = 75
+# Exit code for "stopped on purpose": loop.sh and systemd do not retry it
+EX_CONFIG = 78
 
 
 def scoping_enabled(environ: dict[str, str], dotenv: dict[str, str | None]) -> bool:
@@ -109,6 +115,16 @@ def main(argv: list[str]) -> None:
         print("Usage: python scripts/scoped_env.py scripts/<name>.py [args...]", file=sys.stderr)
         sys.exit(2)
     script, args = argv[0], argv[1:]
+    why = kill_reason()
+    if why and Path(script).name not in ALLOWED_WHILE_KILLED:
+        print(f"[scoped_env] Kill switch is on; not starting {script}: {why}", file=sys.stderr)
+        sys.exit(EX_CONFIG)
+    if Path(script).name in MODEL_SCRIPTS:
+        try:
+            require_spend()
+        except SpendCapReached as exc:
+            print(f"[scoped_env] {exc} Not starting {script}.", file=sys.stderr)
+            sys.exit(EX_TEMPFAIL)
     if Path(script).name in MODEL_SCRIPTS and not take("model_run"):
         print(f"[scoped_env] Daily model-run cap reached; not starting {script}. "
               "It resets at midnight UTC (MAX_MODEL_RUNS_PER_DAY).", file=sys.stderr)

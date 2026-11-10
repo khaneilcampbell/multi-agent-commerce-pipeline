@@ -52,3 +52,5 @@ backups/
 
 # Pause switch for the autonomous loop (./run.sh pause)
 PAUSE
+# Kill switch (./run.sh kill)
+KILL

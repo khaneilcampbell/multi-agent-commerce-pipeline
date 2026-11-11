@@ -77,6 +77,9 @@ nothing is charged in test mode.
 ./run.sh full "Product Name"
 ```
 
+To run without a server, use the scheduled GitHub Actions workflow. Setup is in
+[docs/github-actions.md](docs/github-actions.md).
+
 For the autonomous VPS loop:
 
 ```bash

@@ -1,0 +1,137 @@
+name: Commerce cycle
+
+# Runs the commerce pipeline without a server: one cycle per run (cycle.sh).
+# State (SQLite database, designs, spend ledger, run logs) lives in a private
+# state repo, because this code repo is public and runners keep nothing.
+#
+# Off until the repo variable COMMERCE_LOOP_ENABLED is "true". Setting it to
+# anything else is the kill switch; "Disable workflow" on the Actions tab also
+# stops it. Setup: docs/github-actions.md
+
+on:
+  schedule:
+    - cron: '0 14 * * 1'  # Mondays 14:00 UTC (10:00 New York in summer, 09:00 in winter)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'cycle = design and publish one product. maintain = SEO, storefront and health only.'
+        type: choice
+        options: [cycle, maintain]
+        default: cycle
+      approve:
+        description: 'Optional. Exact name of a draft product to approve and make live instead of running a cycle.'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+# Never two runs at once: both would write the same database.
+concurrency:
+  group: commerce-cycle
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    if: vars.COMMERCE_LOOP_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      COMMERCE_LOOP_ENABLED: ${{ vars.COMMERCE_LOOP_ENABLED }}
+      STATE_REPO: ${{ vars.COMMERCE_STATE_REPO || 'khaneilcampbell/commerce-state' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout private state
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ env.STATE_REPO }}
+          token: ${{ secrets.COMMERCE_STATE_TOKEN }}
+          path: state
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Restore state
+        run: python scripts/actions_state.py restore state
+
+      - name: Write .env from secrets
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          CANVA_CLIENT_ID: ${{ secrets.CANVA_CLIENT_ID }}
+          CANVA_CLIENT_SECRET: ${{ secrets.CANVA_CLIENT_SECRET }}
+          CANVA_REFRESH_TOKEN: ${{ secrets.CANVA_REFRESH_TOKEN }}
+          STOREFRONT_BASE_URL: ${{ vars.STOREFRONT_BASE_URL }}
+          STOREFRONT_GIT_REMOTE: ${{ vars.STOREFRONT_GIT_REMOTE }}
+          STOREFRONT_GIT_BRANCH: ${{ vars.STOREFRONT_GIT_BRANCH }}
+          BRAND_NAME: ${{ vars.BRAND_NAME }}
+          STOREFRONT_TAGLINE: ${{ vars.STOREFRONT_TAGLINE }}
+          SUPPORT_EMAIL: ${{ vars.SUPPORT_EMAIL }}
+          ATLAS_FEED_URL: ${{ vars.ATLAS_FEED_URL }}
+          ATLAS_FEED_TOKEN: ${{ secrets.ATLAS_FEED_TOKEN }}
+          MAX_ANTHROPIC_USD_PER_DAY: ${{ vars.MAX_ANTHROPIC_USD_PER_DAY }}
+          MAX_ANTHROPIC_USD_PER_MONTH: ${{ vars.MAX_ANTHROPIC_USD_PER_MONTH }}
+        run: python scripts/actions_state.py write-env
+
+      - name: Let git push the storefront
+        env:
+          TOKEN: ${{ secrets.COMMERCE_STATE_TOKEN }}
+        run: |
+          git config --global user.name "commerce-cycle"
+          git config --global user.email "commerce-cycle@users.noreply.github.com"
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      # Logs on a public repo are public, so the full output goes to the private
+      # state repo and only the [cycle] summary lines are printed here.
+      - name: Run
+        env:
+          MODE: ${{ inputs.mode || 'cycle' }}
+          APPROVE: ${{ inputs.approve }}
+        run: |
+          mkdir -p logs/runs
+          LOG="logs/runs/$(date -u +%Y%m%d-%H%M%S).log"
+          code=0
+          if [[ -n "$APPROVE" ]]; then
+            ./run.sh approve "$APPROVE" > "$LOG" 2>&1 || code=$?
+            tail -n 3 "$LOG" | grep -v -i 'canva.com' || true
+          else
+            ./cycle.sh "$MODE" > "$LOG" 2>&1 || code=$?
+            grep '^\[cycle' "$LOG" || true
+          fi
+          echo "Full log: $LOG in the state repo"
+          exit $code
+
+      - name: Save state
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.COMMERCE_STATE_TOKEN }}
+          OLD_CANVA_REFRESH_TOKEN: ${{ secrets.CANVA_REFRESH_TOKEN }}
+        run: |
+          python scripts/actions_state.py save state
+          # Canva issues a new refresh token on every refresh and the old one stops working.
+          new=$(python scripts/actions_state.py env-get CANVA_REFRESH_TOKEN)
+          if [[ -n "$new" && "$new" != "$OLD_CANVA_REFRESH_TOKEN" ]]; then
+            echo "::add-mask::$new"
+            printf '%s' "$new" | gh secret set CANVA_REFRESH_TOKEN --repo "$GITHUB_REPOSITORY"
+            echo "Saved the new Canva refresh token."
+          fi
+          cd state
+          git add -A
+          if git diff --cached --quiet; then
+            echo "State unchanged."
+          else
+            git commit -q -m "State after run ${GITHUB_RUN_ID}"
+            git push -q
+            echo "State saved."
+          fi
